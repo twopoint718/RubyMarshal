@@ -17,3 +17,5 @@ cabal.sandbox.config
 *.eventlog
 .stack-work/
 cabal.project.local
+*_flymake.hs
+rc44.dat

@@ -5,17 +5,19 @@ module Data.RubyMarshal where
 
 import           Control.Applicative              ((<|>))
 import           Control.Monad                    (guard)
-import           Control.Monad.State.Strict       (StateT, get, modify')
+import           Control.Monad.State.Strict       (StateT(..), evalStateT, get, modify', put)
 import           Control.Monad.Trans              (lift)
-import           Data.Attoparsec.ByteString       (parseTest, take, word8)
+import           Data.Attoparsec.ByteString       (anyWord8, eitherResult, parseTest, take, word8)
 import           Data.Attoparsec.ByteString.Char8 (anyChar, char, char8)
 import           Data.Attoparsec.Combinator       (count)
+import           Data.Bits                        (Bits, (.|.), complement, shiftL)
 import           Data.ByteString                  (ByteString)
-import           Data.ByteString.Char8            (pack)
+import           Data.ByteString.Char8            (pack, unpack)
 import           Data.Char                        (ord)
 import           Data.Int                         (Int8)
+import           Data.Monoid                      ((<>))
 import           Data.String                      (IsString, fromString)
-import           Data.Word                        (Word8)
+import           Data.Word                        (Word8, Word16, Word32)
 import           Prelude hiding                   (lookup, take)
 
 import qualified Data.Attoparsec.ByteString       as Attoparsec
@@ -68,6 +70,7 @@ rubyValue
   <|> array
   <|> hash
   <|> ivar
+  <|> userDefined
 
 
 long :: Parser Long
@@ -112,20 +115,106 @@ ivar = do
   return $ IVar numIVars content enc
 
 
+userDefined :: Parser RubyValue
+userDefined = do
+  lift $ char 'u'
+  className <- symbol <?> "userDefined className"
+  let parser = case className of
+        "Time" -> time <?> "time"
+        otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
+  result <- parser
+  return result
+    
+
+time :: Parser RubyValue
+time = do
+  encodedTime <- timeStamp <?> "timeStamp"
+  offset <- symbol <?> ":offset"
+  offsetValueSeconds <- long <?> "time zone offset"
+  zone <- symbol <?> ":zone"
+  zoneValue <- ivar <?> "time zone value (CDT)"
+  return . RSymbol $ mconcat
+    [ encodedTime, " "
+    , rshow zoneValue, " "
+    , pack . show $ offsetValueSeconds `div` 3600
+    ]
+
+
+-- TODO: parse 8-byte time value
+timeStamp :: Parser ByteString
+timeStamp = do
+  mystery <- lift (take 1) -- I don't know what this byte means 0x0D
+  encodedTime <- lift (take 8)
+  mystery2 <- lift (take 1) -- I don't know what this byte means 0x07 (2?)
+  return $ "<TimeLit:" <> encodedTime <> ">"
+    
+
+
 size :: Parser Long
 size = do
   firstByte <- lift anyChar
   case firstByte of
     '\x00' -> return 0
-    '\x01' -> error "one byte, following is 123 thru 255"
-    '\xff' -> error "one byte, negative -1 thru -256"
-    '\x02' -> error "two byte, positive little-endian integer"
-    '\xfe' -> error "two bytes, negative little-endian integer"
-    '\x03' -> error "three bytes, positive little-endian integer"
-    '\xfd' -> error "three bytes, negative little-endian integer"
-    '\x04' -> error "four bytes, positive little-endian integer"
-    '\xfc' -> error "four bytes, negative little-endian integer"
+
+    '\x01' ->
+      oneBytePos <$> lift anyWord8
+
+    '\xff' ->
+      oneByteNeg <$> lift anyWord8
+
+    '\x02' ->
+      twoBytePos <$> lift anyWord8 <*> lift anyWord8
+
+    '\xfe' ->
+      twoByteNeg <$> lift anyWord8 <*> lift anyWord8 
+
+    '\x03' ->
+      threeBytePos <$> lift anyWord8 <*> lift anyWord8 <*> lift anyWord8
+      
+    '\xfd' -> 
+      threeByteNeg <$> lift anyWord8 <*> lift anyWord8 <*> lift anyWord8
+
+    '\x04' -> fail "four bytes, positive little-endian integer"
+    '\xfc' -> fail "four bytes, negative little-endian integer"
     b -> return $ rubyShortInt b
+
+
+oneByteNeg :: Word8 -> Long
+oneByteNeg b = -1 * fromIntegral (complement b + 1)
+
+
+oneBytePos :: Word8 -> Long
+oneBytePos b = fromIntegral b
+
+
+twoByteNeg :: Word8 -> Word8 -> Long
+twoByteNeg lsb msb =
+  -1 * fromIntegral (complement (msb' `shiftL` 8 .|. lsb') + 1)
+  where
+    msb', lsb' :: Word16
+    msb' = fromIntegral msb
+    lsb' = fromIntegral lsb
+
+
+twoBytePos :: Word8 -> Word8 -> Long
+twoBytePos lsb msb =
+  fromIntegral msb `shiftL` 8 .|. fromIntegral lsb
+
+
+threeBytePos :: Word8 -> Word8 -> Word8 -> Long
+threeBytePos b1 b2 b3 = 
+  (   fromIntegral b3 `shiftL` 16
+  .|. fromIntegral b2 `shiftL` 8
+  .|. fromIntegral b1
+  )
+
+
+threeByteNeg :: Word8 -> Word8 -> Word8 -> Long
+threeByteNeg b1 b2 b3 = -1 *
+  (   fromIntegral (complement b3) `shiftL` 16
+  .|. fromIntegral (complement b2) `shiftL` 8 
+  .|. fromIntegral (complement b1 + 1)
+  )
 
 
 symbolLit :: Parser RubySymbol
@@ -202,5 +291,35 @@ bool
   <|> (char 'F' *> pure False)
 
 
+-- Util
+
+
+-- FIXME: I think there's a bug in this
+(<?>) :: Parser a -> String -> Parser a
+(<?>) parser failMessage = do
+  currState <- get
+  let parser' = evalStateT parser currState
+  let namedParser = (Attoparsec.<?>) parser' failMessage
+  -- IDEA:
+  put currState
+  lift namedParser
+
+
 c2i8 :: Char -> Int8
 c2i8 = fromIntegral . fromEnum
+
+
+rshow :: RubyValue -> ByteString
+rshow (IVar _ val _) = rshow val
+rshow (RString s) = s
+rshow _ = "<RubyValue>"
+
+
+-- Run the parser
+
+
+parse :: ByteString -> RubyValue
+parse bs =
+  case eitherResult (Attoparsec.parse (evalStateT marshal Map.empty) bs) of
+    Left msg -> error (msg ++ " with input: <" ++ show bs ++ ">")
+    Right x -> x

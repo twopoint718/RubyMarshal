@@ -15,7 +15,7 @@ import Test.Hspec
 import qualified Data.IntMap.Strict as Map
 
 
-import Data.RubyMarshal
+import Data.RubyMarshal hiding (parse)
 
 
 withFixture :: FilePath -> (ByteString -> IO ()) -> IO ()
@@ -26,7 +26,7 @@ withFixture path f = do
 
 
 parse :: Parser a -> ByteString -> Attoparsec.Result a
-parse parser = Attoparsec.parse (evalStateT parser Map.empty)
+parse parser input = Attoparsec.parse (evalStateT parser Map.empty) input
 
 
 testParse :: Parser a -> ByteString -> a
@@ -47,6 +47,24 @@ spec = do
     it "3" $
       testParse (version *> long) "\x04\x08i\x08" `shouldBe` 3
 
+    it "125" $ withFixture "01_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` 125
+
+    it "-125" $ withFixture "ff_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` -125
+
+    it "257" $ withFixture "02_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` 257
+
+    it "-257" $ withFixture "fe_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` -257
+
+    it "99,999" $ withFixture "03_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` 99999
+
+    it "-99,999" $ withFixture "fd_number.dat" $ \fixture ->
+      testParse (version *> long) fixture `shouldBe` -99999
+
 
   describe "ivar" $
     it "cat" $ withFixture "cat.dat" $ \fixture ->
@@ -65,6 +83,7 @@ spec = do
   describe "symbol" $
     it ":foo" $
       testParse (version *> symbol) "\x04\b:\bfoo" `shouldBe` "foo"
+
 
   describe "hashEntry" $
     it "\"1234\" => 45" $
@@ -102,7 +121,20 @@ spec = do
           ]
 
 
-  describe "marshal" $
+  describe "time" $
+    it "inner representation of: 2016-06-17 14:38:09 -0500" $
+      withFixture "time_fragment.dat" $ \fixture ->
+        testParse timeStamp fixture `shouldBe` "<TimeLit:3\SYN\GS\128\v\SOH\147\152>"
+
+
+  describe "userDefined" $
+    it "a timestamp (2016-06-17 14:38:09 -0500)" $
+      withFixture "trimmed_time.dat" $ \fixture ->
+        testParse userDefined fixture
+          `shouldBe` RSymbol "<TimeLit:3\SYN\GS\128\v\SOH\147\152> CDT -5"
+
+
+  describe "marshal" $ do
     it "reads realistic Ruby data" $ withFixture "realistic.dat" $ \fixture ->
       testParse marshal fixture
         `shouldBe` RHash 1
@@ -111,3 +143,8 @@ spec = do
             , (IVar 1 (RString "6789-0") UTF8, RFixnum 80)
             ])
           ]
+
+    it "reads rc44 data" $ withFixture "rc44.dat" $ \fixture ->
+      testParse marshal fixture `shouldBe` RSymbol "barf"
+
+
