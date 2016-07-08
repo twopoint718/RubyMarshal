@@ -66,10 +66,23 @@ spec = do
       testParse (version *> long) fixture `shouldBe` -99999
 
 
+  describe "float" $ do
+    it "8.5" $ withFixture "8.5.dat" $ \fixture ->
+      testParse (version *> float) fixture `shouldBe` RFloat 8.5
+
+    it "20.0" $ withFixture "20.0.dat" $ \fixture ->
+      testParse (version *> float) fixture `shouldBe` RFloat 20.0
+
   describe "ivar" $
     it "cat" $ withFixture "cat.dat" $ \fixture ->
       testParse (version *> ivar) fixture
         `shouldBe` IVar 1 (RString "cat") UTF8
+
+
+  describe "nil" $
+    it "is character '0'" $ 
+      testParse (version *> nil) "\x04\b0"
+        `shouldBe` RNil
 
 
   describe "string" $ do
@@ -125,6 +138,12 @@ spec = do
     it "inner representation of: 2016-06-17 14:38:09 -0500" $
       withFixture "time_fragment.dat" $ \fixture ->
         testParse timeStamp fixture `shouldBe` "<TimeLit:3\SYN\GS\128\v\SOH\147\152>"
+
+
+  describe "userMarshal" $
+    it "ActiveSupport::TimeWithZone <Thu, 07 Jul 2016 15:06:59 UTC +00:00>" $
+      withFixture "time_with_zone.dat" $ \fixture ->
+        testParse (version *> userMarshal) fixture `shouldBe` RTime
 
 
   describe "userDefined" $

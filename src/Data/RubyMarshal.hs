@@ -43,13 +43,16 @@ data Encoding = UTF8 | ASCII deriving (Show, Eq)
 
 
 data RubyValue
-  = IVar Int RubyValue Encoding
-  | RArray NumEntries [RubyValue]
-  | RFixnum Long
-  | RHash NumEntries [HashEntry]
-  | RHashDefault NumEntries RubyValue [HashEntry]
-  | RString RubyString
-  | RSymbol RubySymbol
+  = IVar Int RubyValue Encoding -- ^ Ruby instance variable
+  | RArray NumEntries [RubyValue] -- ^ Ruby Array
+  | RFixnum Long -- ^ Ruby long, variable length
+  | RFloat Float -- ^ Ruby floating point number
+  | RHash NumEntries [HashEntry] -- ^ A Ruby hash (key-value map)
+  | RHashDefault NumEntries RubyValue [HashEntry] -- ^ Ruby hash with default
+  | RNil -- ^ The Ruby nil value
+  | RString RubyString -- ^ A Ruby String
+  | RSymbol RubySymbol -- ^ A Ruby Symbol (see doc on 'symbol')
+  | RTime -- ^ A Ruby timestamp (not implemented)
   deriving (Show, Eq)
 
 
@@ -68,9 +71,12 @@ rubyValue
   <|> (RString <$> string)
   <|> (RSymbol <$> symbol)
   <|> array
+  <|> float
   <|> hash
   <|> ivar
+  <|> nil
   <|> userDefined
+  <|> userMarshal
 
 
 long :: Parser Long
@@ -86,6 +92,27 @@ string = do
   lift $ take n
 
 
+{-|
+  Ruby symbols are dumped as (essentially) strings, they are preceded
+  by either a @:@ (colon) or a @;@ (semicolon).
+
+  The colon means that the symbol is /directly/ included in the dump.
+  A 'size' follows the colon and then the bytes which comprise the
+  name of the symbol.
+
+  > bytes :\0x8foo
+  > ruby  :foo
+
+  The other possibility is a symbol reference. This is a semicolon
+  followed by a 'size' which indicates an index in the symbol lookup
+  table. These sequentially number each symbol.
+
+  > bytes \x04\x08[\a:\nhello;\x00
+  > ruby  [:hello, :hello]
+
+  In the above, the first @:hello@ is included literally. The second
+  one is a reference to the zeroth index in the symbol table.
+-}
 symbol :: Parser RubySymbol
 symbol
   =   symbolLit
@@ -98,6 +125,15 @@ array = do
   numEntries <- size
   entries <- count numEntries rubyValue
   return $ RArray numEntries entries
+
+
+float :: Parser RubyValue
+float = do
+  lift $ char 'f'
+  numBytes <- size
+  str <- lift $ take numBytes
+  let num = read (unpack str)
+  return $ RFloat num
 
 
 hash :: Parser RubyValue
@@ -115,13 +151,30 @@ ivar = do
   return $ IVar numIVars content enc
 
 
+nil :: Parser RubyValue
+nil = lift $ char '0' >> pure RNil
+
+
 userDefined :: Parser RubyValue
 userDefined = do
   lift $ char 'u'
   className <- symbol <?> "userDefined className"
-  let parser = case className of
-        "Time" -> time <?> "time"
-        otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
+  let
+    parser = case className of
+      "Time" -> time <?> "time"
+      otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
+  result <- parser
+  return result
+
+
+userMarshal :: Parser RubyValue
+userMarshal = do
+  lift $ char 'U'
+  className <- symbol <?> "userMarshal className"
+  let
+    parser = case className of
+      "ActiveSupport::TimeWithZone" -> timeWithZone <?> "TimeWithZone"
+      otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
   result <- parser
   return result
     
@@ -140,6 +193,25 @@ time = do
     ]
 
 
+{-|
+  The ActiveSupport::TimeWithZone dump format looks like this:
+
+  > def marshal_dump
+  >   [utc, time_zone.name, time]
+  > end
+
+  utc is of type "Time," the same as the above definition. Next, will
+  be a string naming the time zone (e.g.\"UTC\"). Lastly, there's another
+  timestamp listing the time in the current time zone.
+-}
+timeWithZone :: Parser RubyValue
+timeWithZone = do
+  array <- rubyValue
+  case array of
+    RArray 3 (utc:zone:time:[]) -> return $ RTime --(utc, zone, time)
+    _ -> fail "Invalid TimeWithZone"
+
+
 -- TODO: parse 8-byte time value
 timeStamp :: Parser ByteString
 timeStamp = do
@@ -149,7 +221,32 @@ timeStamp = do
   return $ "<TimeLit:" <> encodedTime <> ">"
     
 
+{-|
+  Size is a variable-length encoded integer. It is used both as the
+  underlying encodning of 'long' (a Ruby \"Fixnum\") and also as "number
+  of bytes" within the marshal dump format itself.
 
+  The first byte indicates how many bytes will follow in the encoding of the number:
+
+    * @\x00@ the number zero (no bytes follow)
+    * @\x01@ a positive one-byte number
+    * @\xff@ a negative one-byte number
+    * @\x02@ a positive two-byte number
+    * @\xfe@ a negative two-byte number
+    * @\x03@ a positive three-byte number
+    * @\xfd@ a negative three-byte number
+    * @\x04@ a positive four-byte number (not implemented)
+    * @\xfc@ a negative four-byte number (not implemented)
+
+  The last case is when the number is in the range -123 to 122. In
+  this case, the number is represented as a signed single-byte. Positive
+  numbers have an offset of -5 (subtract 5 from the marshaled value to
+  arrive at the actual value) and negative values have an offset of +5.
+  Example:
+
+  > bytes \x06
+  > ruby  1
+-}
 size :: Parser Long
 size = do
   firstByte <- lift anyChar
