@@ -133,6 +133,14 @@ spec = do
           , RSymbol "dog"
           ]
 
+    it "[:cat, :cat, :cat]" $ withFixture "tres_cats.dat" $ \fixture ->
+      testParse (version *> array) fixture
+        `shouldBe` RArray 3
+          [ RSymbol "cat"
+          , RSymbol "cat"
+          , RSymbol "cat"
+          ]
+
 
   describe "time" $
     it "inner representation of: 2016-06-17 14:38:09 -0500" $
