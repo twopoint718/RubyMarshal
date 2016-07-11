@@ -36,6 +36,10 @@ testParse p input =
     Right x -> x
 
 
+rString :: ByteString -> RubyValue
+rString s = IVar (RString s) [(RSymbol "E", RTrue)]
+
+
 spec = do
   describe "long" $ do
     it "0" $
@@ -76,7 +80,7 @@ spec = do
   describe "ivar" $
     it "cat" $ withFixture "cat.dat" $ \fixture ->
       testParse (version *> ivar) fixture
-        `shouldBe` IVar 1 (RString "cat") UTF8
+        `shouldBe` rString "cat"
 
 
   describe "nil" $
@@ -101,25 +105,25 @@ spec = do
   describe "hashEntry" $
     it "\"1234\" => 45" $
       testParse hashEntry "I\"\t1234\ACK:\ACKETi2" `shouldBe`
-        (IVar 1 (RString "1234") UTF8, RFixnum 45)
+        (rString "1234", RFixnum 45)
 
 
   describe "hash" $ do
     it "1-entry hash, string keys" $ withFixture "hash.dat" $ \fixture ->
       testParse (version *> hash) fixture
-        `shouldBe` RHash 1 [(IVar 1 (RString "xyz") UTF8, RFixnum 45)]
+        `shouldBe` RHash 1 [(rString "xyz", RFixnum 45)]
 
     it "2-entry hash, string keys" $ withFixture "hash2.dat" $ \fixture ->
       testParse (version *> hash) fixture
         `shouldBe` RHash 2
-          [ (IVar 1 (RString "abc") UTF8, RFixnum 3)
-          , (IVar 1 (RString "xyz") UTF8, RFixnum 4)
+          [ (rString "abc", RFixnum 3)
+          , (rString "xyz", RFixnum 4)
           ]
 
     it "1-entry hash with default" $ withFixture "hashDefault.dat" $ \fixture ->
       testParse (version *> hash) fixture
-        `shouldBe` RHashDefault 1 (IVar 1 (RString "cat") UTF8)
-          [(IVar 1 (RString "zzz") UTF8, RSymbol "foo")]
+        `shouldBe` RHashDefault 1 (rString "cat")
+          [(rString "zzz", RSymbol "foo")]
 
 
   describe "array" $ do
@@ -129,7 +133,7 @@ spec = do
     it "['cat', :dog]" $ withFixture "array.dat" $ \fixture ->
       testParse (version *> array) fixture
         `shouldBe` RArray 2
-          [ IVar 1 (RString "cat") UTF8
+          [ rString "cat"
           , RSymbol "dog"
           ]
 
@@ -165,9 +169,9 @@ spec = do
     it "reads realistic Ruby data" $ withFixture "realistic.dat" $ \fixture ->
       testParse marshal fixture
         `shouldBe` RHash 1
-          [ (IVar 1 (RString "results") UTF8, RHash 2
-            [ (IVar 1 (RString "1234-5") UTF8, RFixnum 14)
-            , (IVar 1 (RString "6789-0") UTF8, RFixnum 80)
+          [ (rString "results", RHash 2
+            [ (rString "1234-5", RFixnum 14)
+            , (rString "6789-0", RFixnum 80)
             ])
           ]
 
