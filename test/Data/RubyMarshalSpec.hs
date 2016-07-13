@@ -43,49 +43,49 @@ rString s = IVar (RString s) [(RSymbol "E", RTrue)]
 spec = do
   describe "long" $ do
     it "0" $
-      testParse (version *> long) "\x04\x08i\NUL" `shouldBe` 0
+      testParse marshal "\x04\x08i\NUL" `shouldBe` RFixnum 0
 
     it "-1" $
-      testParse (version *> long) "\x04\x08i\xFA" `shouldBe` -1
+      testParse marshal "\x04\x08i\xFA" `shouldBe` RFixnum (-1)
 
     it "3" $
-      testParse (version *> long) "\x04\x08i\x08" `shouldBe` 3
+      testParse marshal "\x04\x08i\x08" `shouldBe` RFixnum 3
 
     it "125" $ withFixture "01_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` 125
+      testParse marshal fixture `shouldBe` RFixnum 125
 
     it "-125" $ withFixture "ff_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` -125
+      testParse marshal fixture `shouldBe` RFixnum (-125)
 
     it "257" $ withFixture "02_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` 257
+      testParse marshal fixture `shouldBe` RFixnum 257
 
     it "-257" $ withFixture "fe_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` -257
+      testParse marshal fixture `shouldBe` RFixnum (-257)
 
     it "99,999" $ withFixture "03_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` 99999
+      testParse marshal fixture `shouldBe` RFixnum 99999
 
     it "-99,999" $ withFixture "fd_number.dat" $ \fixture ->
-      testParse (version *> long) fixture `shouldBe` -99999
+      testParse marshal fixture `shouldBe` RFixnum (-99999)
 
 
   describe "float" $ do
     it "8.5" $ withFixture "8.5.dat" $ \fixture ->
-      testParse (version *> float) fixture `shouldBe` RFloat 8.5
+      testParse marshal fixture `shouldBe` RFloat 8.5
 
     it "20.0" $ withFixture "20.0.dat" $ \fixture ->
-      testParse (version *> float) fixture `shouldBe` RFloat 20.0
+      testParse marshal fixture `shouldBe` RFloat 20.0
 
   describe "ivar" $
     it "cat" $ withFixture "cat.dat" $ \fixture ->
-      testParse (version *> ivar) fixture
+      testParse marshal fixture
         `shouldBe` rString "cat"
 
 
   describe "nil" $
     it "is character '0'" $ 
-      testParse (version *> nil) "\x04\b0"
+      testParse marshal "\x04\b0"
         `shouldBe` RNil
 
 
@@ -99,7 +99,7 @@ spec = do
 
   describe "symbol" $
     it ":foo" $
-      testParse (version *> symbol) "\x04\b:\bfoo" `shouldBe` "foo"
+      testParse marshal "\x04\b:\bfoo" `shouldBe` RSymbol "foo"
 
 
   describe "hashEntry" $
@@ -110,18 +110,18 @@ spec = do
 
   describe "hash" $ do
     it "1-entry hash, string keys" $ withFixture "hash.dat" $ \fixture ->
-      testParse (version *> hash) fixture
+      testParse marshal fixture
         `shouldBe` RHash 1 [(rString "xyz", RFixnum 45)]
 
     it "2-entry hash, string keys" $ withFixture "hash2.dat" $ \fixture ->
-      testParse (version *> hash) fixture
+      testParse marshal fixture
         `shouldBe` RHash 2
           [ (rString "abc", RFixnum 3)
           , (rString "xyz", RFixnum 4)
           ]
 
     it "1-entry hash with default" $ withFixture "hashDefault.dat" $ \fixture ->
-      testParse (version *> hash) fixture
+      testParse marshal fixture
         `shouldBe` RHashDefault 1 (rString "cat")
           [(rString "zzz", RSymbol "foo")]
 
@@ -131,14 +131,14 @@ spec = do
       testParse array "[\x06i\x06" `shouldBe` RArray 1 [RFixnum 1]
 
     it "['cat', :dog]" $ withFixture "array.dat" $ \fixture ->
-      testParse (version *> array) fixture
+      testParse marshal fixture
         `shouldBe` RArray 2
           [ rString "cat"
           , RSymbol "dog"
           ]
 
     it "[:cat, :cat, :cat]" $ withFixture "tres_cats.dat" $ \fixture ->
-      testParse (version *> array) fixture
+      testParse marshal fixture
         `shouldBe` RArray 3
           [ RSymbol "cat"
           , RSymbol "cat"
@@ -146,23 +146,36 @@ spec = do
           ]
 
 
-  describe "time" $
+  describe "time" $ do
     it "inner representation of: 2016-06-17 14:38:09 -0500" $
       withFixture "time_fragment.dat" $ \fixture ->
         testParse timeStamp fixture `shouldBe` "<TimeLit:3\SYN\GS\128\v\SOH\147\152>"
 
+    it "parses a full time: <2016-06-17 14:38:09 -0500>" $ withFixture "time.dat" $ \fixture ->
+      testParse marshal fixture
+        `shouldBe` IVar (RSymbol "<TimeLit:3\SYN\GS\128\v\SOH\147\152>")
+          [ (RSymbol "offset", RFixnum (-18000))
+          , (RSymbol "zone", rString "CDT")
+          ]
 
-  describe "userMarshal" $
-    it "ActiveSupport::TimeWithZone <Thu, 07 Jul 2016 15:06:59 UTC +00:00>" $
+    it "xyyzy ActiveSupport::TimeWithZone <Thu, 07 Jul 2016 15:06:59 UTC +00:00>" $
       withFixture "time_with_zone.dat" $ \fixture ->
-        testParse (version *> userMarshal) fixture `shouldBe` RTime
+        testParse marshal fixture `shouldBe` RTime
 
+    it "TimeWithZone: Array of [utc, time_zone.name, time] for <2016-05-13 14:27:21 UTC>" $
+      withFixture "simple_time_with_zone.dat" $ \fixture ->
+        testParse marshal fixture `shouldBe` RTime
 
-  describe "userDefined" $
+    it "TimeWithZone: utc for <2016-05-13 14:27:21 UTC>" $
+      withFixture "utc_time_with_zone.dat" $ \fixture ->
+        testParse marshal fixture
+          `shouldBe` IVar (RSymbol "<TimeLit:\174\DC1\GS\192\164\188Zm>")
+            [(RSymbol "zone", rString "UTC")]
+
     it "a timestamp (2016-06-17 14:38:09 -0500)" $
       withFixture "trimmed_time.dat" $ \fixture ->
         testParse userDefined fixture
-          `shouldBe` RSymbol "<TimeLit:3\SYN\GS\128\v\SOH\147\152> CDT -5"
+          `shouldBe` RSymbol "<TimeLit:3\SYN\GS\128\v\SOH\147\152>"
 
 
   describe "marshal" $ do
@@ -177,5 +190,3 @@ spec = do
 
     it "reads rc44 data" $ withFixture "rc44.dat" $ \fixture ->
       testParse marshal fixture `shouldBe` RSymbol "barf"
-
-

@@ -24,11 +24,13 @@ import qualified Data.Attoparsec.ByteString       as Attoparsec
 import qualified Data.IntMap.Strict               as Map
 
 
+-- FIXME: remove this
+import Debug.Trace
+
+
 type HashEntry = (Key, RubyValue)
 type Key = RubyValue
 type Long = Int
-type Major = Int
-type Minor = Int
 type NumEntries = Long
 type RubyString = ByteString
 type RubySymbol = ByteString
@@ -36,15 +38,10 @@ type SymbolTable = Map.IntMap RubySymbol
 type Parser = StateT SymbolTable Attoparsec.Parser
 
 
-data Version = Version Major Minor deriving Show
-
-
-data Encoding = UTF8 | ASCII deriving (Show, Eq)
-
-
 data RubyValue
-  = IVar Int RubyValue Encoding -- ^ Ruby instance variable
+  = IVar RubyValue [HashEntry] -- ^ Ruby instance variable
   | RArray NumEntries [RubyValue] -- ^ Ruby Array
+  | RFalse -- ^ Ruby False
   | RFixnum Long -- ^ Ruby long, variable length
   | RFloat Float -- ^ Ruby floating point number
   | RHash NumEntries [HashEntry] -- ^ A Ruby hash (key-value map)
@@ -53,6 +50,8 @@ data RubyValue
   | RString RubyString -- ^ A Ruby String
   | RSymbol RubySymbol -- ^ A Ruby Symbol (see doc on 'symbol')
   | RTime -- ^ A Ruby timestamp (not implemented)
+  | RTrue -- ^ Ruby True
+  | RUserMarshal RubySymbol RubyValue
   deriving (Show, Eq)
 
 
@@ -61,16 +60,20 @@ marshal = version >> rubyValue
 
 
 -- Only supports 4.8
-version :: Parser Version
-version = lift $ word8 4 *> word8 8 *> pure (Version 4 8)
+version :: Parser ()
+version = lift $ word8 4 *> word8 8 *> pure ()
 
 
+-- TODO: Think of splitting this into "singular" ruby values and
+-- collections/recursive values. It would be useful in a few places to
+-- parse a single ruby value vs. zero-or-more
 rubyValue :: Parser RubyValue
 rubyValue
   =   (RFixnum <$> long)
   <|> (RString <$> string)
   <|> (RSymbol <$> symbol)
   <|> array
+  <|> bool
   <|> float
   <|> hash
   <|> ivar
@@ -120,11 +123,12 @@ symbol
 
 
 array :: Parser RubyValue
-array = do
+array = trace "> parsing array" $ do
   lift $ char '['
   numEntries <- size
   entries <- count numEntries rubyValue
-  return $ RArray numEntries entries
+  return $ trace ("> parsed array: (" ++ show numEntries ++ ")") $
+    RArray numEntries entries
 
 
 float :: Parser RubyValue
@@ -143,12 +147,13 @@ hash
 
 
 ivar :: Parser RubyValue
-ivar = do
+ivar = trace "> parsing ivar" $ do
   lift $ char 'I'
   content <- rubyValue
   numIVars <- size
-  enc <- encoding
-  return $ IVar numIVars content enc
+  vars <- count numIVars hashEntry
+  return $ trace ("> parsed ivar: " ++ unpack (rshow content)) $
+    IVar content vars
 
 
 nil :: Parser RubyValue
@@ -156,41 +161,37 @@ nil = lift $ char '0' >> pure RNil
 
 
 userDefined :: Parser RubyValue
-userDefined = do
+userDefined = trace "> parsing userDefined" $ do
   lift $ char 'u'
   className <- symbol <?> "userDefined className"
   let
-    parser = case className of
+    parser = case trace ("> userDefined className: " ++ unpack className) className of
       "Time" -> time <?> "time"
       otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
   result <- parser
-  return result
+  return $ trace "> parsed userDefined" $ result
 
 
 userMarshal :: Parser RubyValue
-userMarshal = do
+userMarshal = trace "> parsing userMarshal" $ do
   lift $ char 'U'
   className <- symbol <?> "userMarshal className"
   let
-    parser = case className of
+    parser = case trace ("> userMarshal className: " ++ unpack className) className of
       "ActiveSupport::TimeWithZone" -> timeWithZone <?> "TimeWithZone"
       otherwise -> fail $ "unknown user-defined type: (" ++ unpack className ++ ")"
   result <- parser
-  return result
-    
+  return $ trace "> parsed userMarshal" $ RUserMarshal className result
+
 
 time :: Parser RubyValue
-time = do
-  encodedTime <- timeStamp <?> "timeStamp"
-  offset <- symbol <?> ":offset"
-  offsetValueSeconds <- long <?> "time zone offset"
-  zone <- symbol <?> ":zone"
-  zoneValue <- ivar <?> "time zone value (CDT)"
-  return . RSymbol $ mconcat
-    [ encodedTime, " "
-    , rshow zoneValue, " "
-    , pack . show $ offsetValueSeconds `div` 3600
-    ]
+time = trace "> parsing time" $ do
+  encodedTime <- trace "> entering timeStamp" $ timeStamp <?> "timeStamp"
+  -- offset <- symbol <?> ":offset"
+  -- offsetValueSeconds <- trace ("> offset: " ++ show offset) (long <?> "time zone offset")
+  -- zone <- trace ("> offset value: " ++ show offsetValueSeconds) (symbol <?> ":zone")
+  -- zoneValue <- trace ("> zone: " ++ show zone) (ivar <?> "time zone value (CDT)")
+  return $ trace "> parsed time" $ RSymbol encodedTime
 
 
 {-|
@@ -205,20 +206,15 @@ time = do
   timestamp listing the time in the current time zone.
 -}
 timeWithZone :: Parser RubyValue
-timeWithZone = do
-  array <- rubyValue
-  case array of
-    RArray 3 (utc:zone:time:[]) -> return $ RTime --(utc, zone, time)
-    _ -> fail "Invalid TimeWithZone"
+timeWithZone = rubyValue
 
 
 -- TODO: parse 8-byte time value
 timeStamp :: Parser ByteString
-timeStamp = do
-  mystery <- lift (take 1) -- I don't know what this byte means 0x0D
-  encodedTime <- lift (take 8)
-  mystery2 <- lift (take 1) -- I don't know what this byte means 0x07 (2?)
-  return $ "<TimeLit:" <> encodedTime <> ">"
+timeStamp = trace "> parsing timeStamp" $ do
+  numBytes <- size
+  encodedTime <- trace ("> timeStamp: got " ++ show numBytes ++ " bytes") $ lift (take numBytes)
+  return $ trace "> parsed timeStamp" $ "<TimeLit:" <> encodedTime <> ">"
     
 
 {-|
@@ -350,14 +346,6 @@ hashWithDefault = do
   return $ RHashDefault numEntries defaultValue entries
 
 
-encoding :: Parser Encoding
-encoding = do
-  sym <- symbol
-  guard (sym == "E")
-  b <- bool
-  return $ if b then UTF8 else ASCII
-
-
 rubyShortInt :: Char -> Int
 rubyShortInt c = fromIntegral offsetNum
   where
@@ -381,11 +369,11 @@ hashEntry = do
   return (k, v)
 
 
-bool :: Parser Bool
+bool :: Parser RubyValue
 bool
   = lift
-  $   (char 'T' *> pure True)
-  <|> (char 'F' *> pure False)
+  $   (char 'T' *> pure RTrue)
+  <|> (char 'F' *> pure RFalse)
 
 
 -- Util
@@ -407,7 +395,7 @@ c2i8 = fromIntegral . fromEnum
 
 
 rshow :: RubyValue -> ByteString
-rshow (IVar _ val _) = rshow val
+rshow (IVar val _) = rshow val
 rshow (RString s) = s
 rshow _ = "<RubyValue>"
 
